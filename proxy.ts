@@ -4,12 +4,17 @@ import { updateSession } from "@/lib/supabase/middleware";
 // Next.js 16 renamed the "middleware" file convention to "proxy" (same
 // mechanism, new name/export). Two jobs: keep the Supabase auth session
 // cookie fresh (see lib/supabase/middleware.ts), and require a signed-in
-// session for every route except the public auth ones below — this app has
-// no guest/read-only mode, every page holds a specific user's account data.
-const PUBLIC_PATH_PREFIXES = ["/login", "/signup"];
+// session for every route except the public ones below — this app has no
+// guest/read-only mode for account data, but "/" is the public landing
+// page (app/page.tsx) and must be viewable by a signed-out visitor too.
+// "/" matches only the exact root — matchesPrefix's `${prefix}/` check
+// means it does not also make every other path public.
+const PUBLIC_PATH_PREFIXES = ["/", "/login", "/signup"];
 // Signed-in visitors have no reason to be here — bounce them to the
 // dashboard instead of showing a login/signup form for an account they're
-// already in.
+// already in. Deliberately NOT including "/" here: an authenticated user
+// is still allowed to view the landing page (unlike login/signup, which
+// only make sense for a signed-out visitor).
 const AUTH_ENTRY_PATH_PREFIXES = ["/login", "/signup"];
 
 function matchesPrefix(pathname: string, prefixes: string[]): boolean {

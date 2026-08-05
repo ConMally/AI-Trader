@@ -1,6 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/database";
-import type { BrokerOrder } from "@/lib/broker/types";
 import type { LocalOrderResult } from "@/lib/local-broker/types";
 
 /**
@@ -38,58 +37,63 @@ function mapLocalStatusToOrderStatus(status: LocalOrderResult["status"]): Databa
   return "rejected";
 }
 
-/**
- * Reserved for a future account-sync module: reconciles Alpaca's own
- * order history (read-only, via getRecentOrders — a symbol the user placed
- * directly on Alpaca's own dashboard, outside this app entirely) against
- * our local record, purely for informational display. Not called by
- * anything in this pass — order placement itself never uses this.
- */
-export async function createOrderFromBrokerOrder(
-  supabase: SupabaseClient<Database>,
-  params: { userId: string; accountId: string; proposalId: string; brokerOrder: BrokerOrder }
-) {
-  const { userId, accountId, proposalId, brokerOrder } = params;
-  const { error } = await supabase.from("orders").insert({
-    user_id: userId,
-    account_id: accountId,
-    proposal_id: proposalId,
-    broker_order_id: brokerOrder.brokerOrderId,
-    client_order_id: brokerOrder.clientOrderId,
-    status: brokerOrder.status as Database["public"]["Tables"]["orders"]["Row"]["status"],
-    is_simulated: false,
-  });
-
-  if (error) throw new Error(`Failed to record order: ${error.message}`);
+export interface FilledSimulatedOrderWithDirection {
+  symbol: string;
+  direction: Database["public"]["Tables"]["proposals"]["Row"]["direction"];
+  qty: number;
+  filledAvgPrice: number;
+  submittedAt: string;
 }
 
 /**
- * Used by account-sync to reconcile broker-reported order state against our
- * own record of the same order. Deliberately UPDATE-only, not a true
- * upsert: `orders.proposal_id` is NOT NULL (every order in this schema
- * traces back to a proposal — see 0001_init.sql), so there is no safe way
- * to insert a brand-new row here for an order account-sync doesn't already
- * know about. If `client_order_id` doesn't match an existing row (e.g. an
- * order placed outside this app entirely, directly against the broker),
- * this is a silent no-op — reconciling genuinely out-of-band orders is not
- * in scope for Phase 1.
+ * Every filled LOCAL SIMULATION order for an account, joined with its
+ * proposal's symbol/direction (orders itself has neither column — only
+ * `proposals` does). Ordered oldest-first so lib/local-broker/local-
+ * portfolio.ts can walk it as a ledger. Two queries rather than a
+ * PostgREST embedded select: this project's hand-written Database type
+ * declares no foreign-key `Relationships`, so embedding isn't set up, and
+ * two plain queries plus an in-memory join is simple enough not to need it.
  */
-export async function updateOrderStatusByClientOrderId(
+export async function listFilledSimulatedOrdersWithDirection(
   supabase: SupabaseClient<Database>,
-  brokerOrder: BrokerOrder
-) {
-  const { error } = await supabase
+  accountId: string
+): Promise<FilledSimulatedOrderWithDirection[]> {
+  const { data: orders, error: ordersError } = await supabase
     .from("orders")
-    .update({
-      broker_order_id: brokerOrder.brokerOrderId,
-      status: brokerOrder.status as Database["public"]["Tables"]["orders"]["Row"]["status"],
-      filled_qty: brokerOrder.filledQty,
-      filled_avg_price: brokerOrder.filledAvgPrice,
-      filled_at: brokerOrder.filledAt,
-    })
-    .eq("client_order_id", brokerOrder.clientOrderId);
+    .select("*")
+    .eq("account_id", accountId)
+    .eq("is_simulated", true)
+    .eq("status", "filled")
+    .order("submitted_at", { ascending: true });
 
-  if (error) throw new Error(`Failed to update order status: ${error.message}`);
+  if (ordersError) throw new Error(`Failed to list filled simulated orders: ${ordersError.message}`);
+  if (orders.length === 0) return [];
+
+  const proposalIds = orders.map((o) => o.proposal_id);
+  const { data: proposals, error: proposalsError } = await supabase
+    .from("proposals")
+    .select("id, symbol, direction")
+    .in("id", proposalIds);
+
+  if (proposalsError) throw new Error(`Failed to load proposals for portfolio computation: ${proposalsError.message}`);
+
+  const proposalById = new Map(proposals.map((p) => [p.id, p]));
+
+  return orders
+    .filter((o) => o.filled_avg_price !== null)
+    .map((o) => {
+      const proposal = proposalById.get(o.proposal_id);
+      if (!proposal) {
+        throw new Error(`Order ${o.id} references proposal ${o.proposal_id}, which no longer exists.`);
+      }
+      return {
+        symbol: proposal.symbol,
+        direction: proposal.direction,
+        qty: o.filled_qty,
+        filledAvgPrice: o.filled_avg_price as number,
+        submittedAt: o.submitted_at,
+      };
+    });
 }
 
 /** Local DB read only — used by lib/order-executor/local-reconcile.ts to
@@ -103,6 +107,11 @@ export async function findOrderByClientOrderId(supabase: SupabaseClient<Database
   return data;
 }
 
+/** Every order this table can ever hold is a LOCAL SIMULATION order
+ * (`is_simulated = true`) — Alpaca's own order history is fetched live for
+ * display and never persisted here (see lib/account-sync/README.md), so no
+ * `is_simulated` filter is needed for this to mean "local simulated
+ * orders." */
 export async function listRecentOrders(supabase: SupabaseClient<Database>, accountId: string, limit = 50) {
   const { data, error } = await supabase
     .from("orders")
@@ -113,4 +122,52 @@ export async function listRecentOrders(supabase: SupabaseClient<Database>, accou
 
   if (error) throw new Error(`Failed to list recent orders: ${error.message}`);
   return data;
+}
+
+export interface RecentOrderWithSymbol {
+  id: string;
+  symbol: string;
+  direction: Database["public"]["Tables"]["proposals"]["Row"]["direction"];
+  orderType: Database["public"]["Tables"]["proposals"]["Row"]["order_type"];
+  qty: number;
+  filledQty: number;
+  filledAvgPrice: number | null;
+  status: Database["public"]["Tables"]["orders"]["Row"]["status"];
+  submittedAt: string;
+}
+
+/** Same two-query join as listFilledSimulatedOrdersWithDirection, but for
+ * every status (not just 'filled') — used purely for display
+ * (LocalOrdersTable), not for portfolio math. */
+export async function listRecentOrdersWithSymbol(
+  supabase: SupabaseClient<Database>,
+  accountId: string,
+  limit = 20
+): Promise<RecentOrderWithSymbol[]> {
+  const orders = await listRecentOrders(supabase, accountId, limit);
+  if (orders.length === 0) return [];
+
+  const proposalIds = orders.map((o) => o.proposal_id);
+  const { data: proposals, error } = await supabase.from("proposals").select("id, symbol, direction, order_type, qty").in("id", proposalIds);
+  if (error) throw new Error(`Failed to load proposals for order display: ${error.message}`);
+
+  const proposalById = new Map(proposals.map((p) => [p.id, p]));
+
+  return orders.flatMap((o) => {
+    const proposal = proposalById.get(o.proposal_id);
+    if (!proposal) return [];
+    return [
+      {
+        id: o.id,
+        symbol: proposal.symbol,
+        direction: proposal.direction,
+        orderType: proposal.order_type,
+        qty: proposal.qty,
+        filledQty: o.filled_qty,
+        filledAvgPrice: o.filled_avg_price,
+        status: o.status,
+        submittedAt: o.submitted_at,
+      },
+    ];
+  });
 }

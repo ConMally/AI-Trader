@@ -68,6 +68,24 @@ just the one currently being built:
     informational events (account sync, calendar sync) use
     `logEventSafely`. See `lib/order-executor/README.md` for the full
     critical/best-effort event list and what "fail closed" means for each.
+12. **Three data-model decisions, carried over from the local-simulation
+    recovery — don't undo any of these without asking:**
+    - Local simulated positions are **computed on the fly** from filled
+      `orders` rows (`lib/local-broker/local-portfolio.ts`), never
+      persisted. The `positions` table is broker-synced real Alpaca data
+      only (written by `lib/account-sync/`) — never write a locally
+      simulated position into it.
+    - Alpaca's own order history is fetched **live** for display
+      (`ReadOnlyBrokerAdapter.getRecentOrders()`) and is **never
+      persisted**. `orders.proposal_id` is `NOT NULL` (every persisted
+      order traces to a proposal — 0001_init.sql), and an order placed
+      directly on Alpaca's own dashboard has no proposal; don't loosen
+      that constraint to force broker-history rows into this table.
+    - "Buying power"/"equity" for order validation comes from
+      `lib/local-broker/local-portfolio.ts`'s `computeLocalPortfolio()`
+      (the $1,000 experiment allocation plus the filled local order
+      ledger) — **never** from Alpaca's real account balance, since no
+      order this app places ever reaches Alpaca.
 
 ## Conventions
 
@@ -89,12 +107,17 @@ just the one currently being built:
 
 ## Current status
 
-Phase 1 (Paper Trading & Market-Data Pipeline) in progress. Auth, broker
-read-only adapter, market calendar, market-data, repositories, validator,
-and a local-simulation-only order executor exist and are tested. No
-dashboard/API routes yet, and no dependency on a real brokerage's order
-API anywhere in the codebase — see the "Order placement" rule above.
-No signal/trading logic (Phase 2+) or AI calls (Phase 5+) exist yet.
+Phase 1 (Paper Trading & Market-Data Pipeline) in progress. Auth, the
+read-only broker adapter, market calendar, market-data, repositories,
+validator, a local-simulation-only order executor, read-only account sync,
+all 8 API routes (account snapshot, positions, broker-orders, universe,
+market-data quotes, market-status, orders/confirm, orders/execute), and the
+dashboard + order-ticket UI exist and are tested. No dependency on a real
+brokerage's order API anywhere in the codebase — see the "Order placement"
+rule above. No signal/trading logic (Phase 2+) or AI calls (Phase 5+) exist
+yet. Nothing has been deployed against a real Supabase/Alpaca project in
+this environment — see `docs/SUPABASE.md` for the manual setup still
+required.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LocalOnlyOrderRecorder } from "./local-order-recorder";
+import { LocalOnlyOrderRecorder, previewFill } from "./local-order-recorder";
 import type { ReferenceQuote } from "./types";
 
 const REFERENCE: ReferenceQuote = {
@@ -129,6 +129,18 @@ describe("LocalOnlyOrderRecorder", () => {
       REFERENCE
     );
     expect(result.status).toBe("rejected");
+  });
+
+  it("submitLocalOrder is provably the same calculation as previewFill (delegates, not a parallel copy)", () => {
+    const request = { clientOrderId: "c1", symbol: "AAPL", side: "buy" as const, type: "market" as const, qty: 5 };
+    const preview = previewFill(request, REFERENCE);
+    const submitted = new LocalOnlyOrderRecorder().submitLocalOrder(request, REFERENCE);
+
+    // localOrderId/timestamps differ (fresh each call) — everything else must match exactly.
+    expect(submitted.status).toBe(preview.status);
+    expect(submitted.filledAvgPrice).toBe(preview.filledAvgPrice);
+    expect(submitted.filledQty).toBe(preview.filledQty);
+    expect(submitted.metadata).toEqual(preview.metadata);
   });
 
   it("records full simulation metadata on every result", () => {
