@@ -1,14 +1,20 @@
 # Market Calendar Service
 
-**Status:** not implemented (Phase 1)
+**Status:** Phase 1 implemented.
 
-Wraps Alpaca's `/v2/calendar` endpoint, caching trading days/hours/early-closes
-into the `market_calendar` table. Answers "is the market open right now" for:
+`service.ts` exports the four deterministic functions (`isTradingDay`, `isMarketOpen`,
+`getCurrentTradingSession`, `getNextMarketOpen`) as pure functions over an already-fetched
+`CalendarDay[]` window plus an injectable "now" — no DB or broker access, so DST/holiday/weekend
+behavior is unit-tested against fixed dates (see `service.test.ts`) without waiting for a real
+holiday. `timezone.ts` converts exchange-local (`America/New_York`) wall-clock times to absolute
+UTC instants via `date-fns-tz`, correct across DST transitions.
 
-- the Supabase scheduled Edge Function that gates when the scanner runs
-- the Proposal Validator, which must not accept a submission outside market
-  hours (or must route it as a queued/next-session order, per the eventual
-  design)
+`sync.ts` calls `BrokerAdapter.getCalendar()` and upserts `market_calendar`, explicitly writing a
+`'closed'` row for every date the broker's response omits (weekends, holidays) — so "not synced
+yet" and "known closed" are never confused.
 
-Every scheduled run and every order submission checks this service first.
-See `docs/ARCHITECTURE.md` for how this fits into the pipeline.
+`supabase/functions/sync-market-calendar/` is the scheduled Edge Function that runs this in
+production (self-contained Deno reimplementation of the same logic — see the comment at the top of
+that file for why it isn't a shared import). Every order-submission code path re-checks
+`isMarketOpen` immediately before calling the broker — never trusts a value computed earlier in the
+request.

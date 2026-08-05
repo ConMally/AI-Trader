@@ -34,6 +34,19 @@ just the one currently being built:
 5. **Order submission must be idempotent** via `client_order_id`, and the
    approve→execute state transition must be a single atomic conditional
    update — the same proposal must never produce two orders.
+5a. **Order placement is LOCAL SIMULATION ONLY as of the Phase 1 recovery
+    pass.** `lib/broker/` is read-only (`ReadOnlyBrokerAdapter`/
+    `ReadOnlyAlpacaClient` — no `submitOrder`, no write method of any kind,
+    no `post`/`put`/`patch`/`delete` on the Alpaca client). All order
+    placement lives in `lib/local-broker/` (`LocalOnlyOrderRecorder`),
+    which has zero dependency on `lib/broker/` and makes no network call.
+    `lib/order-executor/executeProposal`'s `recorder` parameter is typed as
+    the concrete `LocalOnlyOrderRecorder` class specifically so nothing
+    Alpaca-backed can be substituted — do not loosen that type to an
+    interface, and do not add a `getLiveOrderAdapter`/real-execution code
+    path without the project owner explicitly asking for it. Reconciliation
+    (`lib/order-executor/local-reconcile.ts`) is local-database-only, never
+    a broker call.
 6. **Default risk per trade is 0.5% of account equity**
    (`risk_limits.risk_per_trade_pct`), configurable but never silently
    changed.
@@ -48,6 +61,13 @@ just the one currently being built:
 10. Follow the phase order in `docs/ROADMAP.md`. Don't build a later
     phase's functionality (e.g. AI rationale generation, live trading)
     while an earlier phase is still in progress or unapproved.
+11. **Critical audit events must fail closed.** Confirmation, execution
+    start/success/rejection, duplicate-submission prevention, and any
+    proposal/order state transition use `logCriticalEvent` (throws on
+    failure — the caller must abort or escalate, never swallow). Purely
+    informational events (account sync, calendar sync) use
+    `logEventSafely`. See `lib/order-executor/README.md` for the full
+    critical/best-effort event list and what "fail closed" means for each.
 
 ## Conventions
 
@@ -69,8 +89,12 @@ just the one currently being built:
 
 ## Current status
 
-Phase 0 (Foundations) — scaffold, schema, docs only. No broker connection,
-no signal/trading logic, no AI calls anywhere in the codebase yet.
+Phase 1 (Paper Trading & Market-Data Pipeline) in progress. Auth, broker
+read-only adapter, market calendar, market-data, repositories, validator,
+and a local-simulation-only order executor exist and are tested. No
+dashboard/API routes yet, and no dependency on a real brokerage's order
+API anywhere in the codebase — see the "Order placement" rule above.
+No signal/trading logic (Phase 2+) or AI calls (Phase 5+) exist yet.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

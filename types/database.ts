@@ -1,17 +1,25 @@
-// Hand-written to match supabase/migrations/0001_init.sql. Once a real
-// Supabase project exists, regenerate this from the live schema instead of
-// hand-editing further:
+// Hand-written to match supabase/migrations/0001_init.sql and
+// 0002_phase1_paper_pipeline.sql. Once a real Supabase project exists,
+// regenerate this from the live schema instead of hand-editing further:
 //
 //   npx supabase gen types typescript --project-id <ref> > types/database.ts
 //
-// Kept hand-written for Phase 0 since no project exists yet to generate
-// from.
+// Kept hand-written since no project exists yet to generate from. Every
+// table below carries `Relationships: []` even though we have no FK
+// relationships to describe yet — @supabase/supabase-js's generic type
+// machinery structurally requires that property to resolve Insert/Update
+// types at all; omitting it silently collapses every insert()/update() call
+// site to `never` instead of raising a clear error, which is exactly what
+// happened here before this was added.
 
 export type AccountMode = "paper" | "live";
 export type ProposalDirection = "buy" | "sell";
 export type ProposalStatus = "pending" | "approved" | "rejected" | "expired" | "executing" | "executed" | "failed";
+export type ProposalSource = "manual" | "ai";
+export type ProposalOrderType = "market" | "limit";
 export type OrderStatus = "submitted" | "accepted" | "partially_filled" | "filled" | "canceled" | "rejected";
 export type MarketSessionType = "regular" | "early_close" | "closed";
+export type QuoteValidationStatus = "ok" | "stale" | "future_dated" | "crossed" | "malformed" | "missing";
 
 export interface Database {
   public: {
@@ -30,6 +38,7 @@ export interface Database {
         Update: {
           display_name?: string | null;
         };
+        Relationships: [];
       };
       accounts: {
         Row: {
@@ -53,6 +62,7 @@ export interface Database {
         Update: {
           kill_switch_enabled?: boolean;
         };
+        Relationships: [];
       };
       universe: {
         Row: {
@@ -71,6 +81,7 @@ export interface Database {
         Update: {
           enabled?: boolean;
         };
+        Relationships: [];
       };
       risk_limits: {
         Row: {
@@ -103,6 +114,7 @@ export interface Database {
           max_price_slippage_pct: number;
           quote_staleness_seconds: number;
         }>;
+        Relationships: [];
       };
       market_calendar: {
         Row: {
@@ -123,6 +135,7 @@ export interface Database {
           market_open: string | null;
           market_close: string | null;
         }>;
+        Relationships: [];
       };
       signals: {
         Row: {
@@ -151,6 +164,7 @@ export interface Database {
           quote_timestamp: string;
         };
         Update: never;
+        Relationships: [];
       };
       backtests: {
         Row: {
@@ -180,6 +194,7 @@ export interface Database {
           stats?: Record<string, unknown>;
         };
         Update: never;
+        Relationships: [];
       };
       proposals: {
         Row: {
@@ -191,12 +206,14 @@ export interface Database {
           direction: ProposalDirection;
           qty: number;
           entry_price: number;
-          stop_price: number;
+          stop_price: number | null;
           target_price: number | null;
-          risk_amount: number;
+          risk_amount: number | null;
           rationale: string | null;
           risk_notes: unknown[];
           ai_model: string | null;
+          source: ProposalSource;
+          order_type: ProposalOrderType;
           status: ProposalStatus;
           client_order_id: string;
           expires_at: string;
@@ -213,12 +230,19 @@ export interface Database {
           direction: ProposalDirection;
           qty: number;
           entry_price: number;
-          stop_price: number;
+          // Nullable at the type level, but only 'manual' rows may actually
+          // omit these — 'ai' rows must supply both (enforced in the DB by
+          // proposals_ai_requires_risk_fields, and mirrored in application
+          // validation before insert).
+          stop_price?: number | null;
           target_price?: number | null;
-          risk_amount: number;
+          risk_amount?: number | null;
           rationale?: string | null;
           risk_notes?: unknown[];
           ai_model?: string | null;
+          source?: ProposalSource;
+          order_type: ProposalOrderType;
+          status?: ProposalStatus;
           client_order_id: string;
           expires_at: string;
         };
@@ -229,6 +253,7 @@ export interface Database {
           status: ProposalStatus;
           decided_at: string | null;
         }>;
+        Relationships: [];
       };
       orders: {
         Row: {
@@ -243,6 +268,10 @@ export interface Database {
           filled_avg_price: number | null;
           submitted_at: string;
           filled_at: string | null;
+          // Defaults true — every order in Phase 1 is a local simulation
+          // (lib/local-broker/), never a real brokerage transmission.
+          is_simulated: boolean;
+          simulation_metadata: Record<string, unknown> | null;
           created_at: string;
           updated_at: string;
         };
@@ -254,6 +283,11 @@ export interface Database {
           broker_order_id?: string | null;
           client_order_id: string;
           status?: OrderStatus;
+          filled_qty?: number;
+          filled_avg_price?: number | null;
+          filled_at?: string | null;
+          is_simulated?: boolean;
+          simulation_metadata?: Record<string, unknown> | null;
         };
         Update: Partial<{
           broker_order_id: string | null;
@@ -262,6 +296,7 @@ export interface Database {
           filled_avg_price: number | null;
           filled_at: string | null;
         }>;
+        Relationships: [];
       };
       positions: {
         Row: {
@@ -291,6 +326,69 @@ export interface Database {
           market_value: number | null;
           unrealized_pl: number | null;
         }>;
+        Relationships: [];
+      };
+      broker_account_snapshots: {
+        Row: {
+          id: string;
+          user_id: string;
+          account_id: string;
+          broker_account_id: string;
+          equity: number;
+          cash: number;
+          buying_power: number;
+          status: string;
+          synced_at: string;
+          raw: Record<string, unknown>;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          account_id: string;
+          broker_account_id: string;
+          equity: number;
+          cash: number;
+          buying_power: number;
+          status: string;
+          raw?: Record<string, unknown>;
+        };
+        Update: never;
+        Relationships: [];
+      };
+      market_data_snapshots: {
+        Row: {
+          id: string;
+          user_id: string;
+          account_id: string;
+          symbol: string;
+          provider: string;
+          feed: string;
+          bid_price: number | null;
+          ask_price: number | null;
+          last_price: number | null;
+          source_timestamp: string;
+          retrieved_at: string;
+          validation_status: QuoteValidationStatus;
+          validation_notes: string | null;
+          raw: Record<string, unknown>;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          account_id: string;
+          symbol: string;
+          provider: string;
+          feed: string;
+          bid_price?: number | null;
+          ask_price?: number | null;
+          last_price?: number | null;
+          source_timestamp: string;
+          validation_status: QuoteValidationStatus;
+          validation_notes?: string | null;
+          raw?: Record<string, unknown>;
+        };
+        Update: never;
+        Relationships: [];
       };
       audit_log: {
         Row: {
@@ -313,7 +411,12 @@ export interface Database {
           payload?: Record<string, unknown>;
         };
         Update: never;
+        Relationships: [];
       };
     };
+    Views: Record<string, never>;
+    Functions: Record<string, never>;
+    Enums: Record<string, never>;
+    CompositeTypes: Record<string, never>;
   };
 }
